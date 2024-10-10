@@ -200,37 +200,37 @@ def aggregate_articles_by_title(articles, threshold):
     return aggregated
 
 def fetch_news():
-
-    # Set the number of returned articles
+    # These could be moved outside the function if they're used elsewhere
     page_size = 10
-    
-    # Set the threshold for title similarity to consider articles as duplicates
     similarity_threshold = 70
 
-    # Get the current time and X days ago in ISO 8601 format
-    current_time = datetime.now(timezone.utc)  # Current UTC time
-    time_x_days_ago = current_time - timedelta(days=5)
-
-    # Convert to the format required by NewsAPI (YYYY-MM-DDTHH:MM:SS)
-    from_date = time_x_days_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
-    to_date = current_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-    # URL for fetching news articles with metadata filtering: articles in the title, exclude irrelevant domains, and time range
-    url = (f'https://newsapi.org/v2/everything?qInTitle={query}&language=en&from={from_date}&to={to_date}'
-           f'&excludeDomains={exclude_domains}&pageSize={page_size}&sortBy=publishedAt&apiKey={newsapi_api_key}')
-
     try:
+        # Get the current time and X days ago in ISO 8601 format
+        current_time = datetime.now(timezone.utc)  # Current UTC time
+        time_x_days_ago = current_time - timedelta(days=5)
+
+        # Convert to the format required by NewsAPI (YYYY-MM-DDTHH:MM:SS)
+        from_date = time_x_days_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
+        to_date = current_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        logging.info(f"Fetching news from {from_date} to {to_date}")
+
+        # URL for fetching news articles
+        url = (f'https://newsapi.org/v2/everything?qInTitle={query}&language=en&from={from_date}&to={to_date}'
+               f'&excludeDomains={exclude_domains}&pageSize={page_size}&sortBy=publishedAt&apiKey={newsapi_api_key}')
+
         response = requests.get(url)
         if response.status_code == 200:
             articles = response.json().get('articles', [])
-            print(f"Found {len(articles)} articles published in the last 30 days.")
+            logging.info(f"Found {len(articles)} articles")
+            print(f"Found {len(articles)} articles published in the last 5 days.")
 
             filtered_articles = []
             
             # Filter out articles that mention competitors or come from .ru domains and calculate score
             for article in articles:
                 description = article.get('description', 'No description available')
-                article_url = article['url']  # Extract the article URL
+                article_url = article['url']
                 domain = get_domain_from_url(article_url)
                 
                 if not contains_competitor(description, competitors) and not is_russian_domain(domain):
@@ -274,14 +274,23 @@ def fetch_news():
                         # Send the full text to GPT for analysis
                         blog_angle = send_to_gpt(full_text, openai_api_key)
                         print(f"\nArticle text being sent to the LLM for analysis...")
-                        # Inside the loop after generating blog_angle
-                        #print(f"Calling save_blog_angles_to_csv with title: {title}, source: {source}, blog_angles: {blog_angle}")
                         save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angle)
 
         else:
-            print(f"Error fetching news: {response.status_code}")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+            logging.error(f"Error fetching news: HTTP {response.status_code}")
+            print(f"Error fetching news: HTTP {response.status_code}")
 
+    except requests.RequestException as e:
+        logging.error(f"Error fetching news: {e}")
+        print(f"Error fetching news: {e}")
+    except json.JSONDecodeError as e:
+        logging.error(f"Error parsing JSON response: {e}")
+        print(f"Error parsing JSON response: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error in fetch_news: {e}")
+        print(f"An unexpected error occurred. Please check the log file for details.")
+        raise
+
+# Note: This should be outside the fetch_news() function
 if __name__ == "__main__":
     fetch_news()
