@@ -313,4 +313,12 @@ def fetch_news():
 
 # Note: This should be outside the fetch_news() function
 if __name__ == "__main__":
-    fetch_news()
+    try:
+        logging.info("Script started")
+        fetch_news()
+        logging.info("Script completed successfully")
+    except Exception as e:
+        logging.critical(f"Critical error in main execution: {e}")
+        print(f"An error occurred. Please check the log file for details.")
+    finally:
+        logging.info("Script execution ended")
