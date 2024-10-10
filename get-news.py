@@ -64,16 +64,30 @@ def is_russian_domain(domain):
 
 def get_article_text_from_diffbot(url):
     """Fetch the full article text using Diffbot."""
+    logging.info(f"Fetching article text from Diffbot for URL: {url}")
     diffbot_url = f'https://api.diffbot.com/v3/article?token={diffbot_api_key}&url={url}'
-    response = requests.get(diffbot_url)
-    if response.status_code == 200:
+    try:
+        response = requests.get(diffbot_url, timeout=10)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
         data = response.json()
         if 'objects' in data and len(data['objects']) > 0:
-            return data['objects'][0].get('text', 'No text available')
+            article_text = data['objects'][0].get('text', 'No text available')
+            logging.info(f"Successfully fetched article text (length: {len(article_text)} characters)")
+            return article_text
         else:
+            logging.warning(f"No content found for URL: {url}")
             return 'No content found'
-    else:
-        print(f"Error fetching article from Diffbot: {response.status_code}")
+    except requests.exceptions.Timeout:
+        logging.error(f"Timeout error when fetching article from Diffbot: {url}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching article from Diffbot: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logging.error(f"Error parsing JSON response from Diffbot: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Unexpected error in get_article_text_from_diffbot: {e}")
         return None
 
 def send_to_gpt(article_text, openai_api_key):
