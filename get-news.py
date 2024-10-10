@@ -76,29 +76,35 @@ def get_article_text_from_diffbot(url):
         print(f"Error fetching article from Diffbot: {response.status_code}")
         return None
 
-def send_to_gpt(article_text,openai_api_key):
-    """Send the full article text to GPT-4 with a specific prompt and return the generated blog angles."""
-
-    # Load the system and user prompts from the .env file (declare inside the function)
-    system_prompt = os.getenv("GPT_SYSTEM_PROMPT")
-    user_prompt = os.getenv("GPT_USER_PROMPT")
-
+def send_to_gpt(article_text, openai_api_key):
+    logging.info("Sending article to GPT for analysis")
     client = OpenAI(api_key=openai_api_key)
     try:
         response = client.chat.completions.create(
-            model="gpt-4",  # Use GPT-4
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"{user_prompt}\n\n"
-                f"Article Text:\n{article_text}\n\n"
-                "Please provide five blog post angles."}
+                {"role": "user", "content": f"{user_prompt}\n\nArticle Text:\n{article_text}\n\nPlease provide five blog post angles."}
             ],
-        max_tokens=500  # Limit to a reasonable length
+            max_tokens=500
         )
-        blog_angles = response.choices[0].message.content.strip()  # Extract and clean the output
-        return blog_angles
+        logging.info("Successfully received response from GPT")
+        return response.choices[0].message.content.strip()
+    except openai.APIError as e:
+        logging.error(f"OpenAI API error: {e}")
+        print(f"Error with OpenAI API: {e}")
+        return "Error generating blog angles."
+    except openai.RateLimitError as e:
+        logging.error(f"OpenAI rate limit exceeded: {e}")
+        print("Rate limit exceeded. Please try again later.")
+        return "Error: Rate limit exceeded."
+    except openai.AuthenticationError as e:
+        logging.error(f"OpenAI authentication error: {e}")
+        print("Authentication error. Please check your API key.")
+        return "Error: Authentication failed."
     except Exception as e:
-        print(f"Error with GPT API: {e}")
+        logging.error(f"Unexpected error in send_to_gpt: {e}")
+        print(f"An unexpected error occurred. Please check the log file for details.")
         return "Error generating blog angles."
 
 # Set up logging to output to a file
