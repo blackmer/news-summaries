@@ -1,5 +1,5 @@
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from fuzzywuzzy import fuzz  # Import fuzzy matching library
 from openai import OpenAI  # Import the OpenAI library
@@ -201,11 +201,11 @@ def fetch_news():
     page_size = 10
     
     # Set the threshold for title similarity to consider articles as duplicates
-    similarity_threshold = 80
+    similarity_threshold = 70
 
-    # Get the current time and 30 days ago in ISO 8601 format
-    current_time = datetime.utcnow()  # Current UTC time
-    time_x_days_ago = current_time - timedelta(days=30)
+    # Get the current time and X days ago in ISO 8601 format
+    current_time = datetime.now(timezone.utc)  # Current UTC time
+    time_x_days_ago = current_time - timedelta(days=5)
 
     # Convert to the format required by NewsAPI (YYYY-MM-DDTHH:MM:SS)
     from_date = time_x_days_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
