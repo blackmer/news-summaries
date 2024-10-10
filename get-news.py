@@ -8,6 +8,10 @@ import os
 import csv
 import traceback  # To print detailed error information
 import logging
+import warnings
+
+# Suppress the SequenceMatcher warning
+warnings.filterwarnings("ignore", category=UserWarning, module='fuzzywuzzy')
 
 load_dotenv()
 
