@@ -1,3 +1,6 @@
+import asyncio
+import aiohttp
+from aiohttp import ClientTimeout
 import requests
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -106,33 +109,41 @@ def is_russian_domain(domain):
     """Check if the domain ends with .ru."""
     return domain.endswith('.ru')
 
-def get_article_text_from_diffbot(url):
-    """Fetch the full article text using Diffbot."""
-    logging.info(f"Fetching article text from Diffbot for URL: {url}")
+async def fetch_article_text(session, url):
     diffbot_url = f'https://api.diffbot.com/v3/article?token={config["diffbot_api_key"]}&url={url}'
     try:
-        response = requests.get(diffbot_url, timeout=10)
-        response.raise_for_status()  # Raises an HTTPError for bad responses
-        data = response.json()
-        if 'objects' in data and len(data['objects']) > 0:
-            article_text = data['objects'][0].get('text', 'No text available')
-            logging.info(f"Successfully fetched article text (length: {len(article_text)} characters)")
-            return article_text
-        else:
-            logging.warning(f"No content found for URL: {url}")
+        async with session.get(diffbot_url, timeout=ClientTimeout(total=10)) as response:
+            data = await response.json()
+            if 'objects' in data and len(data['objects']) > 0:
+                return data['objects'][0].get('text', 'No text available')
             return 'No content found'
-    except requests.exceptions.Timeout:
-        logging.error(f"Timeout error when fetching article from Diffbot: {url}")
-        return None
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         logging.error(f"Error fetching article from Diffbot: {e}")
         return None
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response from Diffbot: {e}")
-        return None
-    except Exception as e:
-        logging.error(f"Unexpected error in get_article_text_from_diffbot: {e}")
-        return None
+    
+async def process_articles(articles):
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_article_text(session, article['url']) for article in articles if article['score'] > 0]
+        article_texts = await asyncio.gather(*tasks)
+        
+    for article, text in zip(articles, article_texts):
+        if text:
+            logging.info(f"Processing article: {article['title']}")
+            print(f"\nFetching full article text for: {article['title']}")
+            print(f"Article text being sent to the LLM for analysis...")
+            blog_angle = send_to_gpt(text)
+            logging.info(f"Blog angles generated for {article['title']}: {blog_angle[:100]}...")  # Log first 100 chars
+            save_blog_angles_to_csv(
+                article['title'], 
+                article['source']['name'], 
+                article['publishedAt'], 
+                article.get('description', 'No description available'), 
+                article['url'], 
+                blog_angle
+            )
+            print(f"Blog angles generated and saved for: {article['title']}")
+        else:
+            logging.warning(f"No text retrieved for article: {article['title']}")
 
 def send_to_gpt(article_text):
     logging.info("Sending article to GPT for analysis")
@@ -142,12 +153,14 @@ def send_to_gpt(article_text):
             model="gpt-4",
             messages=[
                 {"role": "system", "content": config['system_prompt']},
-                {"role": "user", "content": f"{config['user_prompt']}\n\nArticle Text:\n{article_text}\n\nPlease provide five blog post angles."}
+                {"role": "user", "content": f"{config['user_prompt']}\n\nArticle Text:\n{article_text[:500]}...\n\nPlease provide five blog post angles."}
             ],
             max_tokens=500
         )
         logging.info("Successfully received response from GPT")
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content.strip()
+        logging.debug(f"GPT response (first 100 chars): {content[:100]}...")
+        return content
     except Exception as e:
         logging.error(f"Error in send_to_gpt: {e}")
         print(f"Error generating blog angles: {e}")
@@ -159,7 +172,7 @@ logging.basicConfig(filename='script_output.log', level=logging.DEBUG, format='%
 
 def save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angles, filename=None):
     try:
-        print("\nGenerating titles and abstracts...", flush=True)
+        print("\nSaving blog angles to CSV...", flush=True)
         
         logging.debug(f"save_blog_angles_to_csv called with: title={title}, source={source}, published_at={published_at}, description={description}, article_url={article_url}, blog_angles={blog_angles}")
 
@@ -179,47 +192,26 @@ def save_blog_angles_to_csv(title, source, published_at, description, article_ur
             if file.tell() == 0:
                 writer.writerow(["Title", "Source", "Published At", "Description", "URL", "Blog Angle", "Abstract"])
 
-            # Split the blog_angles string into separate angles (assuming each starts on a new line)
+            # Process and write blog angles
             angles = blog_angles.split("\n")
-            logging.debug(f"Split angles: {angles}")
-
-            # Initialize variables to keep track of blog angle and abstract together
             current_blog_angle = None
             current_abstract = None
 
-            # Iterate over blog angles
             for angle in angles:
                 angle = angle.strip()
-                logging.debug(f"Processing angle: '{angle}'")
-
-                if not angle:  # Skip empty lines
-                    logging.debug("Skipping empty angle")
-                    continue
-
-                # Check if this line is an angle (begins with a number or some specific identifier, e.g., "1.", "2.", etc.)
                 if angle.startswith(("1.", "2.", "3.", "4.", "5.")):
-                    # If it's a new blog angle, write the previous angle (if any)
                     if current_blog_angle and current_abstract:
                         writer.writerow([title, source, published_at, description, article_url, current_blog_angle.strip(), current_abstract.strip()])
-                        logging.debug(f"Wrote blog angle and abstract to CSV: '{current_blog_angle}' - '{current_abstract}'")
-
-                    # Now set the new blog angle and clear the current abstract
                     current_blog_angle = angle
-                    current_abstract = None  # Reset the abstract for the next block
-
-                else:
-                    # Concatenate abstract carefully without introducing any unintended characters
-                    if current_blog_angle:
-                        current_abstract = (current_abstract or "").strip() + " " + angle.strip()  # Add space between lines
+                    current_abstract = None
+                elif current_blog_angle:
+                    current_abstract = (current_abstract or "").strip() + " " + angle.strip()
 
             # Write the last blog angle and abstract, if any
             if current_blog_angle and current_abstract:
                 writer.writerow([title, source, published_at, description, article_url, current_blog_angle.strip(), current_abstract.strip()])
-                logging.debug(f"Wrote final blog angle and abstract to CSV: '{current_blog_angle}' - '{current_abstract}'")
 
-        # Print completion message and flush immediately
-        print("\nGeneration complete...", flush=True)
-
+        print(f"Blog angles saved to {filename}", flush=True)
         logging.info(f"Blog angles and abstracts saved to {filename}")
 
     except Exception as e:
@@ -252,7 +244,7 @@ def aggregate_articles_by_title(articles, threshold, max_group_size=5):
     
     return list(groups.values())
 
-def fetch_news():
+async def fetch_news():
     logging.info("Starting fetch_news function")
     try:
         # Get the current time and X days ago in ISO 8601 format
@@ -317,7 +309,7 @@ def fetch_news():
         print(f"\nDisplaying {len(sorted_aggregated_articles)} aggregated topics, sorted by score:")
         for i, group in enumerate(sorted_aggregated_articles, 1):
             highest_scoring_article = max(group, key=lambda article: article['score'])
-            
+        
             print(f"\nTopic {i}: (Top score: {highest_scoring_article['score']})")
             
             for article in group:
@@ -332,16 +324,9 @@ def fetch_news():
                 print(f"   Published At: {published_at}")
                 print(f"   URL: {article_url}")
                 print(f"   Score: {article['score']}")
-                
-                # Fetch full text using Diffbot for the articles with score > 0
-                if article['score'] > 0:
-                    full_text = get_article_text_from_diffbot(article_url)
-                    print("\nFetching full article text...")
-
-                    # Send the full text to GPT for analysis
-                    blog_angle = send_to_gpt(full_text)
-                    print(f"\nArticle text being sent to the LLM for analysis...")
-                    save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angle)
+    
+        # Process all filtered articles once, outside of any loops
+        await process_articles(filtered_articles)
 
     except requests.RequestException as e:
         logging.error(f"Error fetching news: {e}")
@@ -358,7 +343,7 @@ def fetch_news():
 if __name__ == "__main__":
     try:
         logging.info("Script started")
-        fetch_news()
+        asyncio.run(fetch_news())
         logging.info("Script completed successfully")
     except Exception as e:
         logging.critical(f"Critical error in main execution: {e}")
