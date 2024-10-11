@@ -1,43 +1,84 @@
 import requests
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
-from fuzzywuzzy import fuzz  # Import fuzzy matching library
-from openai import OpenAI  # Import the OpenAI library
-from dotenv import load_dotenv
+from fuzzywuzzy import fuzz
+from openai import OpenAI
+import yaml
+from pathlib import Path
 import os
 import csv
-import traceback  # To print detailed error information
+import traceback
 import logging
 import warnings
+import json
+import re
 
 # Suppress the SequenceMatcher warning
 warnings.filterwarnings("ignore", category=UserWarning, module='fuzzywuzzy')
 
-load_dotenv()
+# Set up logging
+logging.basicConfig(filename='script_output.log', level=logging.DEBUG, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Load sensitive information from .env file (without default values)
-newsapi_api_key = os.getenv("NEWSAPI_API_KEY")
-diffbot_api_key = os.getenv("DIFFBOT_API_KEY")
-openai_api_key = os.getenv("OPENAI_API_KEY")
-query = os.getenv("QUERY")  # No default value
-exclude_domains = os.getenv("EXCLUDE_DOMAINS")  # This should remain as a string
-competitors = os.getenv("COMPETITORS").split(',')  # No default value
+def env_var_constructor(loader, node):
+    value = loader.construct_scalar(node)
+    env_var = os.getenv(value)
+    if env_var is None:
+        logging.warning(f"Environment variable {value} is not set")
+        return f"${{{value}}}"  # Return the original placeholder if env var is not set
+    return env_var
 
-# Parse DOMAIN_SCORES from .env (comma-separated list of domain:score pairs)
-domain_scores = dict((item.split(":")[0], int(item.split(":")[1])) for item in os.getenv("DOMAIN_SCORES").split(",") if item)
+def load_config():
+    config_path = Path(__file__).parent / "config.yaml"
+    with open(config_path, 'r') as config_file:
+        config = yaml.safe_load(config_file)
+    
+    # Function to replace environment variables
+    def replace_env_vars(value):
+        if isinstance(value, str):
+            pattern = re.compile(r'\$\{([^}^{]+)\}')
+            matches = pattern.findall(value)
+            for match in matches:
+                env_var = os.getenv(match)
+                if env_var:
+                    value = value.replace(f'${{{match}}}', env_var)
+                else:
+                    logging.warning(f"Environment variable {match} not set")
+        return value
 
-# Optional: raise an error if any critical environment variables are missing
-if not all([newsapi_api_key, diffbot_api_key, openai_api_key, query, exclude_domains, competitors, domain_scores]):
-    raise ValueError("One or more required environment variables are missing.")
+    # Process all values in the config
+    for key in config:
+        config[key] = replace_env_vars(config[key])
+    
+    # Log loaded configuration
+    for key, value in config.items():
+        if 'api_key' in key.lower():
+            logging.info(f"Loaded config {key}: {'*' * 8}")  # Mask API keys in logs
+        else:
+            logging.info(f"Loaded config {key}: {value}")
+    
+    return config
 
+def validate_config(config):
+    required_keys = ['newsapi_api_key', 'diffbot_api_key', 'openai_api_key', 'query', 'exclude_domains']
+    for key in required_keys:
+        if key not in config or not config[key]:
+            raise ValueError(f"Missing or empty required configuration: {key}")
+        if key.endswith('_api_key') and config[key].startswith('${'):
+            raise ValueError(f"Environment variable for {key} not properly set")
 
-# Load the folder path from the .env file (without default value)
-output_folder = os.getenv("OUTPUT_FOLDER")
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Raise an error if OUTPUT_FOLDER is not set in the .env file
-if not output_folder:
-    raise ValueError("The OUTPUT_FOLDER environment variable is missing. Please set it in the .env file.")
+# Use it after loading the config
+config = load_config()
+validate_config(config)
 
+# Validate critical configuration items
+critical_items = ['newsapi_api_key', 'diffbot_api_key', 'openai_api_key', 'query', 'exclude_domains', 'competitors', 'domain_scores', 'output_folder']
+for item in critical_items:
+    if item not in config or not config[item]:
+        raise ValueError(f"Critical configuration item '{item}' is missing or empty.")
 
 def contains_competitor(description, competitors):
     """Check if any competitor is mentioned in the description."""
@@ -65,7 +106,7 @@ def is_russian_domain(domain):
 def get_article_text_from_diffbot(url):
     """Fetch the full article text using Diffbot."""
     logging.info(f"Fetching article text from Diffbot for URL: {url}")
-    diffbot_url = f'https://api.diffbot.com/v3/article?token={diffbot_api_key}&url={url}'
+    diffbot_url = f'https://api.diffbot.com/v3/article?token={config["diffbot_api_key"]}&url={url}'
     try:
         response = requests.get(diffbot_url, timeout=10)
         response.raise_for_status()  # Raises an HTTPError for bad responses
@@ -90,63 +131,43 @@ def get_article_text_from_diffbot(url):
         logging.error(f"Unexpected error in get_article_text_from_diffbot: {e}")
         return None
 
-def send_to_gpt(article_text, openai_api_key):
+def send_to_gpt(article_text):
     logging.info("Sending article to GPT for analysis")
-    client = OpenAI(api_key=openai_api_key)
+    client = OpenAI(api_key=config['openai_api_key'])
     try:
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"{user_prompt}\n\nArticle Text:\n{article_text}\n\nPlease provide five blog post angles."}
+                {"role": "system", "content": config['system_prompt']},
+                {"role": "user", "content": f"{config['user_prompt']}\n\nArticle Text:\n{article_text}\n\nPlease provide five blog post angles."}
             ],
             max_tokens=500
         )
         logging.info("Successfully received response from GPT")
         return response.choices[0].message.content.strip()
-    except openai.APIError as e:
-        logging.error(f"OpenAI API error: {e}")
-        print(f"Error with OpenAI API: {e}")
-        return "Error generating blog angles."
-    except openai.RateLimitError as e:
-        logging.error(f"OpenAI rate limit exceeded: {e}")
-        print("Rate limit exceeded. Please try again later.")
-        return "Error: Rate limit exceeded."
-    except openai.AuthenticationError as e:
-        logging.error(f"OpenAI authentication error: {e}")
-        print("Authentication error. Please check your API key.")
-        return "Error: Authentication failed."
     except Exception as e:
-        logging.error(f"Unexpected error in send_to_gpt: {e}")
-        print(f"An unexpected error occurred. Please check the log file for details.")
+        logging.error(f"Error in send_to_gpt: {e}")
+        print(f"Error generating blog angles: {e}")
         return "Error generating blog angles."
 
 # Set up logging to output to a file
 logging.basicConfig(filename='script_output.log', level=logging.DEBUG, format='%(asctime)s - %(message)s')
 
 
-def save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angles, folder_path=output_folder, filename=None):
-    """
-    Saves blog angles to a CSV file along with article details, ensuring proper alignment of columns
-    and handling abstracts when provided. Now includes a timestamp in the filename.
-    """
-
+def save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angles, filename=None):
     try:
-        # Print status message for the user and flush immediately
         print("\nGenerating titles and abstracts...", flush=True)
         
         logging.debug(f"save_blog_angles_to_csv called with: title={title}, source={source}, published_at={published_at}, description={description}, article_url={article_url}, blog_angles={blog_angles}")
 
-        # Generate a timestamped filename if none is provided
         if not filename:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
             filename = f"blog_angles_{timestamp}.csv"
 
-        # If folder_path is provided, use it to construct the full file path
-        if folder_path:
-            if not os.path.exists(folder_path):
-                os.makedirs(folder_path)  # Create the folder if it doesn't exist
-            filename = os.path.join(folder_path, filename)  # Update the filename to include the folder path
+        folder_path = config['output_folder']
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+        filename = os.path.join(folder_path, filename)
 
         with open(filename, mode='a', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
@@ -220,14 +241,11 @@ def aggregate_articles_by_title(articles, threshold):
     return aggregated
 
 def fetch_news():
-    # These could be moved outside the function if they're used elsewhere
-    page_size = 10
-    similarity_threshold = 70
-
+    logging.info("Starting fetch_news function")
     try:
         # Get the current time and X days ago in ISO 8601 format
-        current_time = datetime.now(timezone.utc)  # Current UTC time
-        time_x_days_ago = current_time - timedelta(days=5)
+        current_time = datetime.now(timezone.utc)
+        time_x_days_ago = current_time - timedelta(days=config['days_to_fetch'])
 
         # Convert to the format required by NewsAPI (YYYY-MM-DDTHH:MM:SS)
         from_date = time_x_days_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -236,69 +254,80 @@ def fetch_news():
         logging.info(f"Fetching news from {from_date} to {to_date}")
 
         # URL for fetching news articles
-        url = (f'https://newsapi.org/v2/everything?qInTitle={query}&language=en&from={from_date}&to={to_date}'
-               f'&excludeDomains={exclude_domains}&pageSize={page_size}&sortBy=publishedAt&apiKey={newsapi_api_key}')
+        url = (f'https://newsapi.org/v2/everything?qInTitle={config["query"]}&language=en&from={from_date}&to={to_date}'
+           f'&excludeDomains={config["exclude_domains"]}&pageSize={config["page_size"]}&sortBy=publishedAt&apiKey={config["newsapi_api_key"]}')
 
         response = requests.get(url)
-        if response.status_code == 200:
-            articles = response.json().get('articles', [])
-            logging.info(f"Found {len(articles)} articles")
-            print(f"Found {len(articles)} articles published in the last 5 days.")
+        response.raise_for_status()  # This will raise an HTTPError for bad responses
 
-            filtered_articles = []
+        articles = response.json().get('articles', [])
+        logging.info(f"Found {len(articles)} articles published in the last {config['days_to_fetch']} days.")
+        print(f"Found {len(articles)} articles published in the last {config['days_to_fetch']} days.")
+
+        logging.debug(f"API Response: {response.text}")
+        logging.debug(f"Initial articles: {articles}")
+
+        filtered_articles = []
+    
+        # Filter out articles that mention competitors or come from .ru domains and calculate score
+        for article in articles:
+            description = article.get('description', 'No description available')
+            article_url = article['url']
+            domain = get_domain_from_url(article_url)
+        
+            if not contains_competitor(description, config['competitors']) and not is_russian_domain(domain):
+                score = get_domain_score(article_url, config['domain_scores'])
+                article['score'] = score
+                filtered_articles.append(article)
+
+        logging.info(f"Filtered down to {len(filtered_articles)} articles")
+
+        # Print detailed information for each filtered article
+        print("\nDetailed Article Information:")
+        for i, article in enumerate(filtered_articles, 1):
+            print(f"\nArticle {i}:")
+            print(f"Title: {article['title']}")
+            print(f"Source: {article['source']['name']}")
+            print(f"Published At: {article['publishedAt']}")
+            print(f"URL: {article['url']}")
+            print(f"Description: {article.get('description', 'No description available')}")
+            print(f"Score: {article['score']}")
+
+        # Aggregate similar articles based on title similarity
+        aggregated_articles = aggregate_articles_by_title(filtered_articles, threshold=config['similarity_threshold'])
+
+        # Sort the aggregated articles by their highest score within each group
+        sorted_aggregated_articles = sorted(aggregated_articles, key=lambda group: max([article['score'] for article in group]), reverse=True)
+
+        # Print aggregated articles sorted by score
+        print(f"\nDisplaying {len(sorted_aggregated_articles)} aggregated topics, sorted by score:")
+        for i, group in enumerate(sorted_aggregated_articles, 1):
+            highest_scoring_article = max(group, key=lambda article: article['score'])
             
-            # Filter out articles that mention competitors or come from .ru domains and calculate score
-            for article in articles:
+            print(f"\nTopic {i}: (Top score: {highest_scoring_article['score']})")
+            
+            for article in group:
+                title = article['title']
+                source = article['source']['name']
+                published_at = article['publishedAt']
                 description = article.get('description', 'No description available')
                 article_url = article['url']
-                domain = get_domain_from_url(article_url)
+
+                print(f"   Title: {title}")
+                print(f"   Source: {source}")
+                print(f"   Published At: {published_at}")
+                print(f"   URL: {article_url}")
+                print(f"   Score: {article['score']}")
                 
-                if not contains_competitor(description, competitors) and not is_russian_domain(domain):
-                    score = get_domain_score(article_url, domain_scores)
-                    article['score'] = score
-                    filtered_articles.append(article)
+                # Fetch full text using Diffbot for the articles with score > 0
+                if article['score'] > 0:
+                    full_text = get_article_text_from_diffbot(article_url)
+                    print("\nFetching full article text...")
 
-            # Aggregate similar articles based on title similarity
-            aggregated_articles = aggregate_articles_by_title(filtered_articles, threshold=similarity_threshold)
-
-            # Sort the aggregated articles by their highest score within each group
-            sorted_aggregated_articles = sorted(aggregated_articles, key=lambda group: max([article['score'] for article in group]), reverse=True)
-
-            # Print aggregated articles sorted by score
-            print(f"Displaying {len(sorted_aggregated_articles)} aggregated topics, sorted by score:")
-            for i, group in enumerate(sorted_aggregated_articles, 1):
-                highest_scoring_article = max(group, key=lambda article: article['score'])
-                
-                print(f"\nTopic {i}: (Top score: {highest_scoring_article['score']})")
-                
-                for article in group:
-                    title = article['title']
-                    source = article['source']['name']
-                    published_at = article['publishedAt']
-                    description = article.get('description', 'No description available')
-                    article_url = article['url']
-
-                    # Display basic information for all articles
-                    print(f"   Title: {title}")
-                    print(f"   Source: {source}")
-                    print(f"   Published At: {published_at}")
-                    print(f"   Description: {description}")
-                    print(f"   URL: {article_url}")
-                    print(f"   Score: {article['score']}")
-                    
-                    # Fetch full text using Diffbot for the articles with score > 0
-                    if article['score'] > 0:
-                        full_text = get_article_text_from_diffbot(article_url)
-                        print("\nFetching full article text...")
-
-                        # Send the full text to GPT for analysis
-                        blog_angle = send_to_gpt(full_text, openai_api_key)
-                        print(f"\nArticle text being sent to the LLM for analysis...")
-                        save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angle)
-
-        else:
-            logging.error(f"Error fetching news: HTTP {response.status_code}")
-            print(f"Error fetching news: HTTP {response.status_code}")
+                    # Send the full text to GPT for analysis
+                    blog_angle = send_to_gpt(full_text)
+                    print(f"\nArticle text being sent to the LLM for analysis...")
+                    save_blog_angles_to_csv(title, source, published_at, description, article_url, blog_angle)
 
     except requests.RequestException as e:
         logging.error(f"Error fetching news: {e}")
