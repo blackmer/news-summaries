@@ -2,6 +2,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from fuzzywuzzy import fuzz
+from collections import defaultdict 
 from openai import OpenAI
 import yaml
 from pathlib import Path
@@ -82,6 +83,8 @@ for item in critical_items:
 
 def contains_competitor(description, competitors):
     """Check if any competitor is mentioned in the description."""
+    if description is None:
+        return False
     description = description.lower()  # Convert to lowercase for case-insensitive comparison
     for competitor in competitors:
         if competitor.lower() in description:
@@ -223,22 +226,31 @@ def save_blog_angles_to_csv(title, source, published_at, description, article_ur
         logging.error(f"Error saving blog angles to CSV file: {e}")
         traceback.print_exc(file=open('script_output.log', 'a'))
 
-def aggregate_articles_by_title(articles, threshold):
-    """Aggregate similar articles based on title similarity."""
-    aggregated = []
-    while articles:
-        base_article = articles.pop(0)
-        similar_articles = [base_article]
-        
-        articles_to_keep = []
-        for article in articles:
-            if fuzz.ratio(base_article['title'], article['title']) >= threshold:
-                similar_articles.append(article)
-            else:
-                articles_to_keep.append(article)
-        articles = articles_to_keep
-        aggregated.append(similar_articles)
-    return aggregated
+def aggregate_articles_by_title(articles, threshold, max_group_size=5):
+    """
+    Aggregate similar articles based on title similarity using a more efficient algorithm.
+    
+    :param articles: List of article dictionaries
+    :param threshold: Similarity threshold (0-100)
+    :param max_group_size: Maximum number of articles in a group (default: 5)
+    :return: List of aggregated article groups
+    """
+    # Sort articles by title to improve clustering efficiency
+    sorted_articles = sorted(articles, key=lambda x: x['title'])
+    
+    groups = defaultdict(list)
+    for article in sorted_articles:
+        added_to_group = False
+        for group_key in groups:
+            if fuzz.ratio(group_key, article['title']) >= threshold:
+                if len(groups[group_key]) < max_group_size:
+                    groups[group_key].append(article)
+                    added_to_group = True
+                break
+        if not added_to_group:
+            groups[article['title']].append(article)
+    
+    return list(groups.values())
 
 def fetch_news():
     logging.info("Starting fetch_news function")
@@ -268,10 +280,8 @@ def fetch_news():
         logging.debug(f"Initial articles: {articles}")
 
         filtered_articles = []
-    
-        # Filter out articles that mention competitors or come from .ru domains and calculate score
         for article in articles:
-            description = article.get('description', 'No description available')
+            description = article.get('description', '')  # Use an empty string if description is None
             article_url = article['url']
             domain = get_domain_from_url(article_url)
         
@@ -294,7 +304,11 @@ def fetch_news():
             print(f"Score: {article['score']}")
 
         # Aggregate similar articles based on title similarity
-        aggregated_articles = aggregate_articles_by_title(filtered_articles, threshold=config['similarity_threshold'])
+        aggregated_articles = aggregate_articles_by_title(
+            filtered_articles, 
+            threshold=config['similarity_threshold'],
+            max_group_size=config.get('max_group_size', 5)
+        )
 
         # Sort the aggregated articles by their highest score within each group
         sorted_aggregated_articles = sorted(aggregated_articles, key=lambda group: max([article['score'] for article in group]), reverse=True)
@@ -336,7 +350,7 @@ def fetch_news():
         logging.error(f"Error parsing JSON response: {e}")
         print(f"Error parsing JSON response: {e}")
     except Exception as e:
-        logging.error(f"Unexpected error in fetch_news: {e}")
+        logging.error(f"Unexpected error in fetch_news: {e}", exc_info=True)
         print(f"An unexpected error occurred. Please check the log file for details.")
         raise
 
