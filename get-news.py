@@ -16,6 +16,7 @@ import logging
 import warnings
 import json
 import re
+from typing import Dict, Any, Optional
 
 # Suppress the SequenceMatcher warning
 warnings.filterwarnings("ignore", category=UserWarning, module='fuzzywuzzy')
@@ -23,6 +24,98 @@ warnings.filterwarnings("ignore", category=UserWarning, module='fuzzywuzzy')
 # Set up logging
 logging.basicConfig(filename='script_output.log', level=logging.DEBUG, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
+
+class PerplexityAPI:
+    """Class to handle Perplexity API interactions."""
+    
+    BASE_URL = "https://api.perplexity.ai/chat/completions"
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        if not self.api_key:
+            raise ValueError("Perplexity API key not found in configuration")
+        
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+    
+    async def async_search_ddos_news(self) -> Optional[Dict[str, Any]]:
+        """
+        Asynchronously search for DDoS attack news using Perplexity's Sonar model.
+        """
+        payload = {
+            "model": "llama-3.1-sonar-huge-128k-online",
+            "messages": [{
+                "role": "system",
+                "content": "You are a news search assistant. Please search for and summarize recent news articles."
+            }, {
+                "role": "user",
+                "content": "Search for news articles about DDoS attacks from the last 24 hours only. Provide only factual information from real news sources. For each article found, include the source, publication date, URL, and a brief summary."
+            }]
+        }
+        
+        try:
+            logging.info("Making request to Perplexity API...")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.BASE_URL,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return result
+                    
+                    error_text = await response.text()
+                    logging.error(f"Perplexity API error: {error_text}")
+                    return None
+                    
+        except Exception as e:
+            logging.error(f"Error in Perplexity API request: {e}")
+            return None
+
+def parse_perplexity_results(results: Dict[str, Any]) -> list:
+    """
+    Parse the Perplexity API results into a format compatible with our existing article structure.
+    """
+    if not results or 'choices' not in results or not results['choices']:
+        return []
+
+    response_content = results['choices'][0].get('message', {}).get('content', '')
+    if response_content.strip() == "NO_RECENT_ARTICLES":
+        return []
+
+    parsed_articles = []
+    article_texts = response_content.split('\n\n')
+    
+    for article_text in article_texts:
+        try:
+            # Extract URL using regex
+            url_match = re.search(r'https?://[^\s]+', article_text)
+            url = url_match.group(0) if url_match else None
+            
+            if url:
+                # Clean up title by removing Markdown formatting and number prefix
+                title_line = article_text.split('\n')[0]
+                title = re.sub(r'^\d+\.\s*', '', title_line)  # Remove number prefix
+                title = re.sub(r'\*\*', '', title)  # Remove Markdown bold syntax
+                
+                article = {
+                    'title': title,
+                    'url': url,
+                    'source': {'name': 'Perplexity API'},
+                    'publishedAt': datetime.now().isoformat(),
+                    'description': article_text,
+                    'score': 1
+                }
+                parsed_articles.append(article)
+        except Exception as e:
+            logging.warning(f"Error parsing Perplexity article: {e}")
+            continue
+    
+    return parsed_articles
 
 def env_var_constructor(loader, node):
     value = loader.construct_scalar(node)
@@ -64,7 +157,7 @@ def load_config():
     return config
 
 def validate_config(config):
-    required_keys = ['newsapi_api_key', 'diffbot_api_key', 'openai_api_key', 'query', 'exclude_domains']
+    required_keys = ['newsapi_api_key', 'diffbot_api_key', 'openai_api_key', 'perplexity_api_key', 'query', 'exclude_domains']
     for key in required_keys:
         if key not in config or not config[key]:
             raise ValueError(f"Missing or empty required configuration: {key}")
@@ -98,12 +191,17 @@ def get_domain_from_url(article_url):
     """Extract the domain from the article URL."""
     parsed_url = urlparse(article_url)
     domain = parsed_url.netloc
+    # Remove 'www.' prefix if present
+    if domain.startswith('www.'):
+        domain = domain[4:]
     return domain
 
 def get_domain_score(article_url, domain_scores):
     """Return the score for the domain extracted from the article URL."""
     domain = get_domain_from_url(article_url)
-    return domain_scores.get(domain, 0)
+    score = domain_scores.get(domain, 0)
+    logging.info(f"URL: {article_url}, Extracted domain: {domain}, Score: {score}")  # Add this line
+    return score
 
 def is_russian_domain(domain):
     """Check if the domain ends with .ru."""
@@ -247,33 +345,43 @@ def aggregate_articles_by_title(articles, threshold, max_group_size=5):
 async def fetch_news():
     logging.info("Starting fetch_news function")
     try:
-        # Get the current time and X days ago in ISO 8601 format
+        # Initialize both news sources
+        newsapi_articles = []
+        perplexity_articles = []
+
+        # Fetch from NewsAPI
         current_time = datetime.now(timezone.utc)
         time_x_days_ago = current_time - timedelta(days=config['days_to_fetch'])
-
-        # Convert to the format required by NewsAPI (YYYY-MM-DDTHH:MM:SS)
         from_date = time_x_days_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
         to_date = current_time.strftime('%Y-%m-%dT%H:%M:%SZ')
 
         logging.info(f"Fetching news from {from_date} to {to_date}")
 
-        # URL for fetching news articles
         url = (f'https://newsapi.org/v2/everything?qInTitle={config["query"]}&language=en&from={from_date}&to={to_date}'
-           f'&excludeDomains={config["exclude_domains"]}&pageSize={config["page_size"]}&sortBy=publishedAt&apiKey={config["newsapi_api_key"]}')
+               f'&excludeDomains={config["exclude_domains"]}&pageSize={config["page_size"]}&sortBy=publishedAt&apiKey={config["newsapi_api_key"]}')
 
         response = requests.get(url)
-        response.raise_for_status()  # This will raise an HTTPError for bad responses
+        if response.ok:
+            newsapi_articles = response.json().get('articles', [])
+            logging.info(f"Found {len(newsapi_articles)} articles from NewsAPI")
+            print(f"Found {len(newsapi_articles)} articles from NewsAPI")
 
-        articles = response.json().get('articles', [])
-        logging.info(f"Found {len(articles)} articles published in the last {config['days_to_fetch']} days.")
-        print(f"Found {len(articles)} articles published in the last {config['days_to_fetch']} days.")
+        # Fetch from Perplexity API
+        perplexity = PerplexityAPI(config['perplexity_api_key'])
+        perplexity_results = await perplexity.async_search_ddos_news()
+        if perplexity_results:
+            perplexity_articles = parse_perplexity_results(perplexity_results)
+            logging.info(f"Found {len(perplexity_articles)} articles from Perplexity")
+            print(f"Found {len(perplexity_articles)} articles from Perplexity")
 
-        logging.debug(f"API Response: {response.text}")
-        logging.debug(f"Initial articles: {articles}")
+        # Combine articles from both sources
+        all_articles = newsapi_articles + perplexity_articles
+        logging.info(f"Total articles found: {len(all_articles)}")
+        print(f"Total articles found: {len(all_articles)}")
 
         filtered_articles = []
-        for article in articles:
-            description = article.get('description', '')  # Use an empty string if description is None
+        for article in all_articles:
+            description = article.get('description', '')
             article_url = article['url']
             domain = get_domain_from_url(article_url)
         
@@ -303,29 +411,26 @@ async def fetch_news():
         )
 
         # Sort the aggregated articles by their highest score within each group
-        sorted_aggregated_articles = sorted(aggregated_articles, key=lambda group: max([article['score'] for article in group]), reverse=True)
+        sorted_aggregated_articles = sorted(
+            aggregated_articles, 
+            key=lambda group: max([article['score'] for article in group]), 
+            reverse=True
+        )
 
         # Print aggregated articles sorted by score
         print(f"\nDisplaying {len(sorted_aggregated_articles)} aggregated topics, sorted by score:")
         for i, group in enumerate(sorted_aggregated_articles, 1):
             highest_scoring_article = max(group, key=lambda article: article['score'])
-        
             print(f"\nTopic {i}: (Top score: {highest_scoring_article['score']})")
             
             for article in group:
-                title = article['title']
-                source = article['source']['name']
-                published_at = article['publishedAt']
-                description = article.get('description', 'No description available')
-                article_url = article['url']
-
-                print(f"   Title: {title}")
-                print(f"   Source: {source}")
-                print(f"   Published At: {published_at}")
-                print(f"   URL: {article_url}")
+                print(f"   Title: {article['title']}")
+                print(f"   Source: {article['source']['name']}")
+                print(f"   Published At: {article['publishedAt']}")
+                print(f"   URL: {article['url']}")
                 print(f"   Score: {article['score']}")
     
-        # Process all filtered articles once, outside of any loops
+        # Process all filtered articles
         await process_articles(filtered_articles)
 
     except requests.RequestException as e:
