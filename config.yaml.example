@@ -1,0 +1,37 @@
+# Save this as config.yaml.example
+# API Keys (use environment variables)
+newsapi_api_key: ${NEWSAPI_KEY}
+diffbot_api_key: ${DIFFBOT_KEY}
+openai_api_key: ${OPENAI_KEY}
+perplexity_api_key: ${PERPLEXITY_KEY}
+
+# Search Parameters
+query: "your search query"
+days_to_fetch: 7
+page_size: 100
+similarity_threshold: 80
+max_group_size: 5
+
+# Output Configuration
+output_folder: "output"
+
+# Domain Exclusions (comma-separated)
+exclude_domains: "example1.com,example2.com"
+
+# Domain Scores (examples)
+domain_scores:
+  "highqualitynews.com": 5
+  "reliablesource.com": 4
+  "goodnews.com": 3
+  "newsblog.com": 2
+  "generalnews.com": 1
+
+# Competitors to filter out (examples)
+competitors:
+  - "competitor1"
+  - "competitor2"
+  - "competitor3"
+
+# GPT Prompts
+system_prompt: "You are a content expert specializing in..."
+user_prompt: "Based on the following article, please provide..."
