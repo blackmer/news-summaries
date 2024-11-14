@@ -17,6 +17,7 @@ import warnings
 import json
 import re
 from typing import Dict, Any, Optional
+from competitor_monitor import CompetitorMonitor
 
 # Suppress the SequenceMatcher warning
 warnings.filterwarnings("ignore", category=UserWarning, module='fuzzywuzzy')
@@ -77,9 +78,7 @@ class PerplexityAPI:
             return None
 
 def parse_perplexity_results(results: Dict[str, Any]) -> list:
-    """
-    Parse the Perplexity API results into a format compatible with our existing article structure.
-    """
+    """Parse and filter Perplexity API results"""
     if not results or 'choices' not in results or not results['choices']:
         return []
 
@@ -90,6 +89,9 @@ def parse_perplexity_results(results: Dict[str, Any]) -> list:
     parsed_articles = []
     article_texts = response_content.split('\n\n')
     
+    # Calculate the cutoff time (24 hours ago)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+    
     for article_text in article_texts:
         try:
             # Extract URL using regex
@@ -97,20 +99,28 @@ def parse_perplexity_results(results: Dict[str, Any]) -> list:
             url = url_match.group(0) if url_match else None
             
             if url:
-                # Clean up title by removing Markdown formatting and number prefix
+                # Clean up title
                 title_line = article_text.split('\n')[0]
-                title = re.sub(r'^\d+\.\s*', '', title_line)  # Remove number prefix
-                title = re.sub(r'\*\*', '', title)  # Remove Markdown bold syntax
+                title = re.sub(r'^\d+\.\s*', '', title_line)
+                title = re.sub(r'\*\*', '', title)
                 
-                article = {
-                    'title': title,
-                    'url': url,
-                    'source': {'name': 'Perplexity API'},
-                    'publishedAt': datetime.now().isoformat(),
-                    'description': article_text,
-                    'score': 1
-                }
-                parsed_articles.append(article)
+                # Try to extract date from article text
+                date_match = re.search(r'\b\d{4}-\d{2}-\d{2}\b', article_text)
+                if date_match:
+                    article_date = datetime.strptime(date_match.group(0), '%Y-%m-%d')
+                    article_date = article_date.replace(tzinfo=timezone.utc)
+                    
+                    # Only include articles within last 24 hours
+                    if article_date >= cutoff_time:
+                        article = {
+                            'title': title,
+                            'url': url,
+                            'source': {'name': 'Perplexity API'},
+                            'publishedAt': article_date.isoformat(),
+                            'description': article_text,
+                            'score': 1
+                        }
+                        parsed_articles.append(article)
         except Exception as e:
             logging.warning(f"Error parsing Perplexity article: {e}")
             continue
@@ -345,9 +355,10 @@ def aggregate_articles_by_title(articles, threshold, max_group_size=5):
 async def fetch_news():
     logging.info("Starting fetch_news function")
     try:
-        # Initialize both news sources
+        # Initialize both news sources and competitor monitor
         newsapi_articles = []
         perplexity_articles = []
+        competitor_monitor = CompetitorMonitor(config)
 
         # Fetch from NewsAPI
         current_time = datetime.now(timezone.utc)
@@ -373,65 +384,78 @@ async def fetch_news():
             perplexity_articles = parse_perplexity_results(perplexity_results)
             logging.info(f"Found {len(perplexity_articles)} articles from Perplexity")
             print(f"Found {len(perplexity_articles)} articles from Perplexity")
+        
+        perplexity_results = await perplexity.async_search_ddos_news()
+        logging.info(f"Perplexity API response received: {perplexity_results is not None}")
+        if perplexity_results:
+            perplexity_articles = parse_perplexity_results(perplexity_results)
+            logging.info(f"Parsed Perplexity articles: {len(perplexity_articles)}")
+        else:
+            logging.warning("No results from Perplexity API")
 
         # Combine articles from both sources
         all_articles = newsapi_articles + perplexity_articles
         logging.info(f"Total articles found: {len(all_articles)}")
         print(f"Total articles found: {len(all_articles)}")
 
+        # Process articles with competitor monitoring
         filtered_articles = []
         for article in all_articles:
-            description = article.get('description', '')
-            article_url = article['url']
+            article_url = article.get('url')
+            if not article_url:
+                logging.warning(f"Article missing URL: {article}")
+                continue
+                
             domain = get_domain_from_url(article_url)
-        
-            if not contains_competitor(description, config['competitors']) and not is_russian_domain(domain):
-                score = get_domain_score(article_url, config['domain_scores'])
-                article['score'] = score
+            if is_russian_domain(domain):
+                continue
+                
+            score = get_domain_score(article_url, config['domain_scores'])
+            article['score'] = score
+            
+            # Use competitor monitor instead of simple filtering
+            article_type = competitor_monitor.process_article(article)
+            if article_type == 'normal':
                 filtered_articles.append(article)
 
         logging.info(f"Filtered down to {len(filtered_articles)} articles")
 
-        # Print detailed information for each filtered article
-        print("\nDetailed Article Information:")
-        for i, article in enumerate(filtered_articles, 1):
-            print(f"\nArticle {i}:")
-            print(f"Title: {article['title']}")
-            print(f"Source: {article['source']['name']}")
-            print(f"Published At: {article['publishedAt']}")
-            print(f"URL: {article['url']}")
-            print(f"Description: {article.get('description', 'No description available')}")
-            print(f"Score: {article['score']}")
+        # Generate competitor report
+        competitor_report = competitor_monitor.generate_competitor_report()
+        if competitor_report:
+            print(f"\nCompetitor mentions report generated: {competitor_report}")
 
-        # Aggregate similar articles based on title similarity
-        aggregated_articles = aggregate_articles_by_title(
-            filtered_articles, 
-            threshold=config['similarity_threshold'],
-            max_group_size=config.get('max_group_size', 5)
-        )
+        # Process filtered articles
+        if filtered_articles:
+            # Aggregate similar articles
+            aggregated_articles = aggregate_articles_by_title(
+                filtered_articles, 
+                threshold=config['similarity_threshold'],
+                max_group_size=config.get('max_group_size', 5)
+            )
 
-        # Sort the aggregated articles by their highest score within each group
-        sorted_aggregated_articles = sorted(
-            aggregated_articles, 
-            key=lambda group: max([article['score'] for article in group]), 
-            reverse=True
-        )
+            # Sort by score
+            sorted_aggregated_articles = sorted(
+                aggregated_articles, 
+                key=lambda group: max([article['score'] for article in group]), 
+                reverse=True
+            )
 
-        # Print aggregated articles sorted by score
-        print(f"\nDisplaying {len(sorted_aggregated_articles)} aggregated topics, sorted by score:")
-        for i, group in enumerate(sorted_aggregated_articles, 1):
-            highest_scoring_article = max(group, key=lambda article: article['score'])
-            print(f"\nTopic {i}: (Top score: {highest_scoring_article['score']})")
-            
-            for article in group:
-                print(f"   Title: {article['title']}")
-                print(f"   Source: {article['source']['name']}")
-                print(f"   Published At: {article['publishedAt']}")
-                print(f"   URL: {article['url']}")
-                print(f"   Score: {article['score']}")
-    
-        # Process all filtered articles
-        await process_articles(filtered_articles)
+            # Print results
+            print(f"\nDisplaying {len(sorted_aggregated_articles)} aggregated topics, sorted by score:")
+            for i, group in enumerate(sorted_aggregated_articles, 1):
+                highest_scoring_article = max(group, key=lambda article: article['score'])
+                print(f"\nTopic {i}: (Top score: {highest_scoring_article['score']})")
+                
+                for article in group:
+                    print(f"   Title: {article['title']}")
+                    print(f"   Source: {article['source']['name']}")
+                    print(f"   Published At: {article['publishedAt']}")
+                    print(f"   URL: {article['url']}")
+                    print(f"   Score: {article['score']}")
+
+            # Process articles
+            await process_articles(filtered_articles)
 
     except requests.RequestException as e:
         logging.error(f"Error fetching news: {e}")
