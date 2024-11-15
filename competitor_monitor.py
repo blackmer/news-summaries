@@ -1,20 +1,25 @@
-# competitor_monitor.py
 from collections import defaultdict
 from datetime import datetime
 import csv
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 class CompetitorMonitor:
     def __init__(self, config: Dict):
         self.config = config
         self.competitor_mentions = defaultdict(list)
+        self.setup_logging()
         logging.info("CompetitorMonitor initialized")
     
-    def process_article(self, article: Dict) -> str:
+    def setup_logging(self):
+        """Configure logging for the competitor monitor."""
+        self.logger = logging.getLogger(__name__)
+    
+    def process_article(self, article: Dict) -> Tuple[str, List[str]]:
         """
         Process an article and track competitor mentions.
-        Returns: 'competitor' or 'normal'
+        Returns: Tuple of (article_type, list_of_mentioned_competitors)
         """
         description = article.get('description', '')
         mentioned_competitors = self.find_mentioned_competitors(description)
@@ -29,8 +34,8 @@ class CompetitorMonitor:
                     'context': self.extract_mention_context(description, competitor)
                 })
             logging.info(f"Competitor mention found in article: {article.get('title', 'No title')}")
-            return 'competitor'
-        return 'normal'
+            return 'competitor', mentioned_competitors
+        return 'normal', []
     
     def find_mentioned_competitors(self, text: Optional[str]) -> List[str]:
         """Find which competitors are mentioned in the text"""
@@ -69,17 +74,17 @@ class CompetitorMonitor:
         return context
     
     def generate_competitor_report(self) -> Optional[str]:
-        """Generate a report of competitor mentions"""
+        """Generate a report of competitor mentions."""
         if not self.competitor_mentions:
             logging.info("No competitor mentions to report")
             return None
             
         timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-        output_folder = self.config.get('output_folder', '.')
-        filename = f"{output_folder}/competitor_mentions_{timestamp}.csv"
+        output_path = Path('outputs') / f"competitor_mentions_{timestamp}.csv"
+        output_path.parent.mkdir(exist_ok=True)
         
         try:
-            with open(filename, 'w', newline='', encoding='utf-8') as f:
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['Competitor', 'Article Title', 'Date', 'URL', 'Context'])
                 
@@ -93,8 +98,8 @@ class CompetitorMonitor:
                             mention['context']
                         ])
             
-            logging.info(f"Competitor report generated: {filename}")
-            return filename
+            logging.info(f"Competitor report generated: {output_path}")
+            return str(output_path)
         except Exception as e:
             logging.error(f"Error generating competitor report: {e}")
             return None
