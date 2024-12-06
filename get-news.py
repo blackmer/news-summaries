@@ -375,7 +375,7 @@ async def fetch_news():
         if response.ok:
             newsapi_articles = response.json().get('articles', [])
             logging.info(f"Found {len(newsapi_articles)} articles from NewsAPI")
-            print(f"Found {len(newsapi_articles)} articles from NewsAPI")
+            print(f"\nFound {len(newsapi_articles)} articles from NewsAPI")
 
         # Fetch from Perplexity API
         perplexity = PerplexityAPI(config['perplexity_api_key'])
@@ -384,19 +384,14 @@ async def fetch_news():
             perplexity_articles = parse_perplexity_results(perplexity_results)
             logging.info(f"Found {len(perplexity_articles)} articles from Perplexity")
             print(f"Found {len(perplexity_articles)} articles from Perplexity")
-        
-        perplexity_results = await perplexity.async_search_ddos_news()
-        logging.info(f"Perplexity API response received: {perplexity_results is not None}")
-        if perplexity_results:
-            perplexity_articles = parse_perplexity_results(perplexity_results)
-            logging.info(f"Parsed Perplexity articles: {len(perplexity_articles)}")
         else:
             logging.warning("No results from Perplexity API")
+            print("Found 0 articles from Perplexity")
 
         # Combine articles from both sources
         all_articles = newsapi_articles + perplexity_articles
         logging.info(f"Total articles found: {len(all_articles)}")
-        print(f"Total articles found: {len(all_articles)}")
+        print(f"\nTotal articles found: {len(all_articles)}")
 
         # Process articles with competitor monitoring
         filtered_articles = []
