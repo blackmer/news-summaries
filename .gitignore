@@ -6,3 +6,4 @@ config.yaml
 blog_angles*
 ddos_news*
 __pycache__/
+outputs/
